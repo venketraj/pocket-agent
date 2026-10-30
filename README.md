@@ -16,6 +16,10 @@ File operations are limited to `demo_files/workspace`. In interactive mode, the 
 
 This is a demo project, not a production agent or security boundary.
 
+## Presentation
+
+[Download the Pocket-Sized Brains presentation](Pocket-Sized-Brains.pptx).
+
 ## Requirements
 
 - Windows 10 or 11
