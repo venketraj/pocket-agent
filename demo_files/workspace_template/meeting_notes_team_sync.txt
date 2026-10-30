@@ -1,0 +1,10 @@
+Sample team sync - 28 Oct 2026
+Attendees: Alex, Riley, Sam
+
+- The team wants to reduce time spent sorting routine support requests.
+- Agreed to test a small language model on a set of fictional sample messages.
+- Keep sample data local during the first evaluation.
+- Alex will prepare a small labelled test set for the next review.
+- Riley will compare two local models for accuracy and response time.
+- Unclear requests should be routed to a person for review.
+- Next review: 14 Nov.

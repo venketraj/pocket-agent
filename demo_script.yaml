@@ -1,0 +1,27 @@
+﻿# Scripted demo, played by:  python pocket_agent.py --script demo_script.yaml
+# Step keys: caption (starts a new act and clears the conversation), wifi: off|on,
+# explorer: true (opens the workspace folder on the right), ask (typed question),
+# pause (seconds after the answer), check (used by rehearse.py)
+
+- caption: "Act 1 · Wi-Fi OFF · the agent reads the agenda"
+  wifi: "off"
+- ask: "When does the last session end today, and how many minutes do we have left?"
+  check: agenda
+  pause: 8
+
+- caption: "Act 2 · Real files on this laptop"
+  explorer: true
+- ask: "Tidy my workspace: move the invoices into an Invoices folder and the images into a Photos folder. Then read the meeting notes and save a 3-bullet summary as summary.md."
+  check: files
+  pause: 9
+
+- caption: "Act 3 · The agent drives a browser"
+- ask: "Open feedback_form.html and submit this feedback: name Venket, session Pocket-Sized Brains, rating 5, I'll try: running Gemma on my own laptop, improve: more live demos."
+  check: browser
+  pause: 8
+
+- caption: "Act 4 · Wi-Fi back ON · too hard for the cat? Ask the elephant"
+  wifi: "on"
+- ask: "Plan a 3-day trip to Madurai for a first-time visitor."
+  check: hybrid
+  pause: 12

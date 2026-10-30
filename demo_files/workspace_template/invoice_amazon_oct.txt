@@ -1,0 +1,5 @@
+INVOICE #A-2291
+Date: 12 Oct 2026
+Item: USB-C to HDMI adapter (for conference talks)
+Qty: 1
+Total: Rs 1,499

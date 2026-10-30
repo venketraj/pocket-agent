@@ -1,0 +1,13 @@
+Madurai Sangamam (Dev Carnival 2027 pre-conference)
+Saturday 31 October 2026
+(placeholder times: edit this file with the real schedule)
+
+09:30-10:00  Registration and welcome
+10:00-10:45  Opening keynote
+10:45-11:00  Tea break
+11:00-12:30  Morning talks
+12:30-13:30  Lunch
+13:30-16:00  Afternoon talks and workshops
+16:00-16:15  Tea break
+16:15-17:00  Pocket-Sized Brains: Building Local AI Agents with Small Language Models (Venket Raj S) - LAST SESSION
+17:00-17:15  Closing remarks and group photo

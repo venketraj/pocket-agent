@@ -1,0 +1,5 @@
+INVOICE #CG-7781
+Date: 01 Oct 2026
+Item: Cloud GPU hours and LLM API tokens, September
+Total: USD 412.80
+Note: this is why we are moving routine work to local models.

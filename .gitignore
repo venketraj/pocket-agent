@@ -1,0 +1,19 @@
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+Thumbs.db
+Desktop.ini
+
+# Local/generated data
+/demo_files/workspace/
+runs/
+recordings/
+backup/
