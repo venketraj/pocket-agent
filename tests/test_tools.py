@@ -10,6 +10,8 @@ def workspace(tmp_path, monkeypatch):
     (ws / "notes.txt").write_text("hello", encoding="utf-8")
     (tmp_path / "secret.txt").write_text("outside", encoding="utf-8")
     monkeypatch.setattr(pa, "WORKSPACE", ws)
+    monkeypatch.setattr(pa, "DATA", tmp_path / "agent_data")
+    monkeypatch.setattr(pa, "_session", {"files": 0, "bytes": 0})
     return ws
 
 

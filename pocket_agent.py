@@ -7,16 +7,20 @@ and an optional hand-off to a cloud LLM (Claude).
 import argparse
 import ast
 import datetime as dt
+import hashlib
 import json
+import math
 import operator
 import os
 import re
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
 import time
+from contextlib import closing
 from pathlib import Path
 
 import ollama
@@ -35,6 +39,9 @@ HEADLESS = os.getenv("BROWSER_HEADLESS", "false").lower() == "true"
 DEMO = ROOT / "demo_files"
 WORKSPACE = DEMO / "workspace"
 SITE = DEMO / "site"
+DATA = DEMO / "agent_data"  # write audit log + memory, outside the workspace so the file tools can't touch them
+EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
+MAX_MEMORY_CHARS = 2000
 MAX_STEPS = 15
 # USD per 1M tokens (input, output), for the "same tokens in the cloud" estimate
 PRICES = {"claude-haiku-5-5": (0.10, 0.50), "claude-sonnet-5-5": (2.0, 10.0), "claude-opus-5-5": (4.0, 20.0)}
@@ -46,6 +53,8 @@ Do time maths with the calculate tool in minutes. Minutes left = end time minus 
 from get_time, e.g. from 14:05 until 15:30 is: 15*60+30 - (14*60+5).
 File paths are relative to the user's workspace folder. For any request about files,
 first call list_files to see what is there; never ask the user for file names.
+To create several files at once (e.g. a small website), use write_files with all of them in one call.
+Use remember when the user asks you to remember something, and recall for questions about earlier sessions.
 For travel plans, long-form writing, current events or anything that needs broad world knowledge,
 ALWAYS call ask_big_brain instead of answering yourself.
 Keep final answers short: at most 3 sentences unless the user asks for more."""
@@ -123,19 +132,157 @@ def read_file(path: str) -> str:
     return _safe(path).read_text(encoding="utf-8", errors="replace")[:4000]
 
 
+WRITE_EXTS = {".md", ".txt", ".html", ".htm", ".css", ".json", ".csv", ".tsv", ".xml", ".yaml", ".yml", ".svg", ".log"}
+# refused by name for a clearer error; .js/.py/.vbs etc. run on double-click in Windows
+BLOCKED_EXTS = {".exe", ".com", ".bat", ".cmd", ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh",
+                ".hta", ".msi", ".msp", ".scr", ".pif", ".dll", ".sys", ".cpl", ".lnk", ".url", ".reg", ".jar",
+                ".py", ".pyw", ".sh", ".appx", ".msix", ".iso", ".chm"}
+MAX_FILE_BYTES, MAX_BATCH_FILES = 200_000, 20
+MAX_SESSION_FILES, MAX_SESSION_BYTES = 50, 2_000_000
+_session = {"files": 0, "bytes": 0}
+_RESERVED = re.compile(r"^(con|prn|aux|nul|com\d|lpt\d|conin\$|conout\$)(\..*)?$", re.I)
+
+
+def _plan_writes(files: list) -> list[tuple[Path, str]]:
+    """Check a whole batch against the sandbox rules (nothing is written) and pick each file's final name."""
+    if not isinstance(files, list) or not files:
+        raise ValueError("files must be a non-empty list of {path, content} objects")
+    if len(files) > MAX_BATCH_FILES:
+        raise PermissionError(f"at most {MAX_BATCH_FILES} files per batch")
+    plan, taken, total = [], set(), 0
+    for f in files:
+        if not isinstance(f, dict) or not isinstance(f.get("path"), str) or not isinstance(f.get("content"), str):
+            raise ValueError("each file needs a text 'path' and 'content'")
+        path, content = f["path"], f["content"]
+        # before resolving: drive letters, alternate data streams (a.txt:x) and UNC/rooted paths
+        if ":" in path or path.startswith(("/", "\\")):
+            raise PermissionError(f"'{path}' must be a relative path inside the workspace")
+        p = _safe(path)  # resolves .. and symlinks/junctions, refuses anything outside the workspace
+        for part in Path(path).parts:
+            if part not in (".", "..") and (_RESERVED.match(part) or part != part.rstrip(". ")):
+                raise PermissionError(f"'{part}' is not an allowed file or folder name")
+        ext = p.suffix.lower()
+        if ext in BLOCKED_EXTS:
+            raise PermissionError(f"'{ext}' files are executable and can't be written")
+        if ext not in WRITE_EXTS:
+            raise PermissionError(f"'{ext or 'no extension'}' is not an allowed type: {' '.join(sorted(WRITE_EXTS))}")
+        size = len(content.encode("utf-8"))
+        if size > MAX_FILE_BYTES:
+            raise PermissionError(f"'{path}' is {size:,} bytes, the limit is {MAX_FILE_BYTES:,}")
+        target, n = p, 2
+        while target.exists() or target in taken:  # never overwrite: save a new version instead
+            target, n = p.with_name(f"{p.stem}-{n}{p.suffix}"), n + 1
+        taken.add(target)
+        total += size
+        plan.append((target, content))
+    if _session["files"] + len(plan) > MAX_SESSION_FILES or _session["bytes"] + total > MAX_SESSION_BYTES:
+        raise PermissionError(f"session write limit reached ({MAX_SESSION_FILES} files / {MAX_SESSION_BYTES:,} bytes)")
+    return plan
+
+
+def _rel(p: Path) -> str:
+    return p.relative_to(WORKSPACE.resolve()).as_posix()
+
+
+def preview_writes(files: list) -> str:
+    """Dry run: what write_files would create, without touching the disk."""
+    lines = []
+    for (target, content), f in zip(_plan_writes(files), files):
+        note = f"  (exists, saved as new version of {f['path']})" if target != _safe(f["path"]) else ""
+        lines.append(f"  + {_rel(target)}  {len(content.encode('utf-8')):,} bytes{note}")
+    return f"Write {len(lines)} file(s) in the workspace?\n" + "\n".join(lines)
+
+
+def _commit(plan: list[tuple[Path, str]]) -> str:
+    DATA.mkdir(parents=True, exist_ok=True)
+    done = []
+    with open(DATA / "writes.jsonl", "a", encoding="utf-8") as log:
+        for target, content in plan:
+            data = content.encode("utf-8")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open(target, "xb") as fh:  # "x": fail rather than overwrite if it appeared meanwhile
+                fh.write(data)
+            _session["files"] += 1
+            _session["bytes"] += len(data)
+            log.write(json.dumps({"t": dt.datetime.now().isoformat(timespec="seconds"), "path": _rel(target),
+                                  "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}) + "\n")
+            done.append(f"{_rel(target)} ({len(data):,} bytes)")
+    return "wrote " + ", ".join(done)
+
+
 def write_file(path: str, content: str) -> str:
-    """Create or overwrite a .md or .txt file in the workspace.
+    """Create one text file in the workspace (.md .txt .html .css .json .csv .xml .yaml .svg ...).
+    An existing file is never overwritten: a new version such as name-2.md is saved instead.
 
     Args:
-        path: file path relative to the workspace, ending in .md or .txt
+        path: file path relative to the workspace
         content: the full text to write
     """
-    p = _safe(path)
-    if p.suffix.lower() not in (".md", ".txt"):
-        raise PermissionError("only .md and .txt files can be written")
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content, encoding="utf-8")
-    return f"wrote {len(content)} characters to {path}"
+    return _commit(_plan_writes([{"path": path, "content": content}]))
+
+
+def write_files(files: list[dict]) -> str:
+    """Create several text files in the workspace in one go, for example a small website or a set of notes.
+    The user sees a preview of all files and approves them before anything is written.
+
+    Args:
+        files: a list of objects, each {"path": "folder/name.ext", "content": "full text"}
+    """
+    return _commit(_plan_writes(files))
+
+
+def _memory_db() -> sqlite3.Connection:
+    DATA.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(DATA / "memory.db")
+    db.execute("CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY, t TEXT, text TEXT, vec TEXT)")
+    return db
+
+
+def _embed(text: str) -> list[float] | None:
+    try:
+        return list(ollama.embed(model=EMBED_MODEL, input=text).embeddings[0])
+    except Exception:  # embedding model not pulled or Ollama down: recall falls back to keywords
+        return None
+
+
+def remember(text: str) -> str:
+    """Save a fact or preference to long-term memory on this laptop, so it can be recalled in later sessions.
+
+    Args:
+        text: the fact to remember, in one or two sentences
+    """
+    text = text.strip()
+    if not text or len(text) > MAX_MEMORY_CHARS:
+        raise ValueError(f"a memory must be 1 to {MAX_MEMORY_CHARS} characters")
+    vec = _embed(text)
+    with closing(_memory_db()) as db, db:
+        cur = db.execute("INSERT INTO memories (t, text, vec) VALUES (?, ?, ?)",
+                         (dt.date.today().isoformat(), text, json.dumps(vec) if vec else None))
+    return f"remembered (memory #{cur.lastrowid})"
+
+
+def recall(query: str, k: int = 3) -> str:
+    """Search long-term memory for facts saved earlier with remember.
+
+    Args:
+        query: what to look for
+        k: how many memories to return
+    """
+    with closing(_memory_db()) as db:
+        rows = db.execute("SELECT t, text, vec FROM memories").fetchall()
+    # shortcut: brute-force scan in Python, fine for a few thousand memories; switch to sqlite-vec beyond that
+    qv = _embed(query) if rows else None
+    words = set(re.findall(r"\w+", query.lower()))
+
+    def score(text, vec):
+        if qv and vec and len(v := json.loads(vec)) == len(qv):
+            dot = sum(a * b for a, b in zip(qv, v))
+            return dot / (math.hypot(*qv) * math.hypot(*v) or 1)
+        return len(words & set(re.findall(r"\w+", text.lower()))) / max(len(words), 1)
+
+    hits = sorted(((score(text, vec), t, text) for t, text, vec in rows), reverse=True)
+    hits = [h for h in hits[:max(1, min(int(k), 10))] if h[0] > 0]
+    return "\n".join(f"- {text} (saved {t})" for _, t, text in hits) or "nothing in memory matches that"
 
 
 def move_file(path: str, to_folder: str) -> str:
@@ -306,9 +453,9 @@ def ask_big_brain(question: str) -> str:
     return "".join(b.text for b in r.content if b.type == "text")
 
 
-TOOLS = [get_time, calculate, read_agenda, list_files, read_file, write_file, move_file,
-         open_page, fill_and_submit, ask_big_brain]
-CHANGES = {"write_file", "move_file", "fill_and_submit"}  # need the user's OK
+TOOLS = [get_time, calculate, read_agenda, list_files, read_file, write_file, write_files, move_file,
+         open_page, fill_and_submit, ask_big_brain, remember, recall]
+CHANGES = {"write_file", "write_files", "move_file", "fill_and_submit"}  # need the user's OK
 
 
 def reset_workspace():
@@ -357,9 +504,12 @@ class Agent:
                 try:
                     if name not in self.tools:
                         raise ValueError(f"unknown tool '{name}'")
-                    if name in CHANGES and approved is None:
+                    if name == "write_files":  # every batch gets its own dry-run preview and OK
+                        if not self.confirm(preview_writes(args.get("files"))):
+                            raise PermissionError("the user did not allow these files")
+                    elif name in CHANGES and approved is None:
                         approved = self.confirm("Allow the agent to change files / submit forms for this request?")
-                    if name in CHANGES and not approved:
+                    if name in CHANGES - {"write_files"} and not approved:
                         raise PermissionError("the user did not allow this change")
                     out = str(self.tools[name](**args))
                 except Exception as e:
@@ -627,6 +777,7 @@ class Dashboard:
 def run(args):
     import ctypes
     from rich.live import Live
+    from rich.markup import escape
     global BROWSER_ARGS, _log
     ctypes.windll.kernel32.SetConsoleOutputCP(65001)  # emoji render as mojibake otherwise
     sys.stdout.reconfigure(encoding="utf-8")
@@ -643,9 +794,9 @@ def run(args):
     if args.script:
         import yaml
         script = yaml.safe_load(Path(args.script).read_text(encoding="utf-8"))
-        agent.confirm = lambda q: ui.say(f"[magenta]❓ {q}[/]") or ui.type_line("Allow? (y/n) ", "y", cps=4) == "y"
+        agent.confirm = lambda q: ui.say(f"[magenta]❓ {escape(q)}[/]") or ui.type_line("Allow? (y/n) ", "y", cps=4) == "y"
     else:
-        agent.confirm = lambda q: ui.say(f"[magenta]❓ {q}[/]") or ui.read_line("Allow? (y/n) ").strip().lower() == "y"
+        agent.confirm = lambda q: ui.say(f"[magenta]❓ {escape(q)}[/]") or ui.read_line("Allow? (y/n) ").strip().lower() == "y"
 
     with Live(get_renderable=ui.render, console=ui.console, screen=True, refresh_per_second=12):
         ui.say(f"[dim]Loading {LOCAL_MODEL}…[/]")

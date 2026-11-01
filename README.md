@@ -87,6 +87,13 @@ The demo exercises local reasoning and tools, then reconnects to the cloud hando
 | `CLOUD_MODEL` | `claude-haiku-5-5` | Claude model used for the optional handoff |
 | `DEMO_NOW` | empty | Freeze the clock at `HH:MM`, useful for repeatable demos |
 | `ALLOW_WEB` | `false` | Allow the browser tool to open external websites |
+| `EMBED_MODEL` | `nomic-embed-text` | Ollama embedding model for `recall`; keyword search is used if it is not pulled |
+
+### File writes and memory
+
+`write_file` and `write_files` only create files inside `demo_files/workspace`. Paths with `..`, drive letters, UNC paths, `:` streams, Windows device names, or links out of the workspace are refused. Only text types are allowed (`.md .txt .html .htm .css .json .csv .tsv .xml .yaml .yml .svg .log`), and executable types such as `.exe .bat .ps1 .js .py .lnk` are refused. Limits are 200 KB per file, 20 files per batch, and 50 files or 2 MB per session. Existing files are never overwritten: a new version such as `summary-2.md` is saved. A batch is checked in full, shown as a preview, and written only after you approve it. Every write is logged with its size and SHA-256 in `demo_files/agent_data/writes.jsonl`.
+
+`remember` and `recall` store notes in `demo_files/agent_data/memory.db` (SQLite). The store survives a workspace reset and uses only local Ollama.
 
 To enable the Claude handoff, set `ANTHROPIC_API_KEY` in your local `.env`. Keep API keys private. You can select a different local model with `--model MODEL_NAME` or by setting `LOCAL_MODEL`.
 
